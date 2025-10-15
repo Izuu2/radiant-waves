@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+ingest.log
+cache_articles.json
+.env
+application_default_credentials.json
+C:\Users\Izuu.ekeh\AppData\Roaming\gcloud/

@@ -1,0 +1,9 @@
+flask
+flask-cors
+gunicorn
+feedparser
+requests
+beautifulsoup4
+google-cloud-firestore
+google-auth
+google-auth-oauthlib
