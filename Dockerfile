@@ -1,17 +1,28 @@
+# ---- Base image ----
 FROM python:3.11-slim
 
+# Helpful defaults
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=8080
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# Install deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# System deps (grpc etc. sometimes need build tools)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Add app code
+# Python deps
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# App code
 COPY . .
 
-# Run the Flask API with gunicorn (use $PORT provided by Cloud Run / env)
-CMD ["sh", "-c", "gunicorn -w 2 -k gthread -b :${PORT:-8080} api:app"]
+# Render provides $PORT at runtime
+ENV PORT=8080
+EXPOSE 8080
+
+# Start Gunicorn (Flask app in api.py as 'app')
+CMD ["bash", "-lc", "gunicorn api:app --bind 0.0.0.0:${PORT}"]
