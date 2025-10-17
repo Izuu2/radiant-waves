@@ -538,5 +538,16 @@ def health():
     return "ok"
 
 # ------------- Main -------------
+from apscheduler.schedulers.background import BackgroundScheduler
+from atexit import register
+import subprocess, os
+
+def run_ingest_job():
+    subprocess.run(["python", "scripts/ingest.py"], check=False)
+
 if __name__ == "__main__":
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(run_ingest_job, "interval", minutes=30)
+    scheduler.start()
+    register(lambda: scheduler.shutdown(wait=False))
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
