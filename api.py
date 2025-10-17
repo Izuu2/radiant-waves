@@ -551,3 +551,23 @@ if __name__ == "__main__":
     scheduler.start()
     register(lambda: scheduler.shutdown(wait=False))
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+
+
+import logging, os, subprocess
+from apscheduler.schedulers.background import BackgroundScheduler
+from atexit import register
+
+logging.basicConfig(level=logging.INFO)
+
+def run_ingest_job():
+    logging.info("🚀 Ingest job starting…")
+    subprocess.run(["python", "scripts/ingest.py"], check=False)
+    logging.info("✅ Ingest job finished")
+
+if __name__ == "__main__":
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(run_ingest_job, "interval", minutes=30)
+    scheduler.start()
+    logging.info("🕒 Scheduler started (every 30 min)")
+    register(lambda: scheduler.shutdown(wait=False))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
