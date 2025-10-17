@@ -6,7 +6,7 @@ import requests
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from google.cloud import firestore
-
+from google.oauth2 import service_account
 # ----------------- Config -----------------
 PROJECT_ID = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
 FETCH_WINDOW = int(os.getenv("FETCH_WINDOW", "500"))  # how many newest docs to consider server-side
@@ -61,8 +61,40 @@ def doc_to_public(d):
     return out
 
 # Firestore
-db = firestore.Client(project=PROJECT_ID) if PROJECT_ID else firestore.Client()
+# db = firestore.Client(project=PROJECT_ID) if PROJECT_ID else firestore.Client()
+# coll = db.collection("articles")
+# Firestore (credential-aware)
+# --- Firestore auth bootstrap ---
+from google.oauth2 import service_account  # make sure this import exists above
+
+CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
+
+def _is_service_account_json(path: str) -> bool:
+    try:
+        if not path or not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return (
+            data.get("type") == "service_account"
+            and data.get("client_email")
+            and data.get("token_uri")
+        )
+    except Exception:
+        return False
+
+if _is_service_account_json(CREDS_PATH):
+    creds = service_account.Credentials.from_service_account_file(CREDS_PATH)
+    db = firestore.Client(project=(PROJECT_ID or creds.project_id), credentials=creds)
+    log.info(f"Firestore: using service account at {CREDS_PATH}")
+else:
+    # No valid service-account JSON -> use Application Default Credentials
+    # (locally works if you've run: gcloud auth application-default login)
+    db = firestore.Client(project=(PROJECT_ID or None))
+    log.info("Firestore: using Application Default Credentials")
+
 coll = db.collection("articles")
+
 
 # ------------- CORS + cache control -------------
 @app.after_request
