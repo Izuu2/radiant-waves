@@ -1,5 +1,9 @@
 import { API_BASE, REFRESH_INTERVAL_MS } from "./settings.js?v=20250827a";
 
+const LOADER = document.getElementById('rw-loader');
+const showLoader = () => { if (LOADER) LOADER.style.display = 'grid'; };
+const hideLoader = () => { if (LOADER) LOADER.style.display = 'none'; };
+
 const els = {
   navLinks: document.querySelectorAll(".nav-link"),
   form: document.getElementById("searchForm"),
@@ -10,8 +14,9 @@ const els = {
 };
 
 let currentFeed = ""; // "" = Home; else: "politics" | "football" | "celebrity"
-const DEFAULT_LIMIT = 12;
-const HOME_PER_FEED = 50;
+const DEFAULT_LIMIT = 12;      // keep
+const HOME_PER_FEED = 20;      // was 50 → reduce to 20 for speed
+
 const POLL_MS = Number.isFinite(REFRESH_INTERVAL_MS) ? REFRESH_INTERVAL_MS : 30 * 60 * 1000;
 
 const FEED_TITLES = { politics: "Politics", football: "Football", celebrity: "Celebrity" };
@@ -65,13 +70,16 @@ function markUpdated() {
 async function safeLoad() {
   if (inflight) return;
   inflight = true;
+  showLoader();
   try {
     await load();
     markUpdated();
   } finally {
+    hideLoader();
     inflight = false;
   }
 }
+
 
 /* ---------- FETCH ---------- */
 async function fetchJSON(u) {
@@ -299,3 +307,23 @@ document.addEventListener("visibilitychange", () => {
 
 // refresh when the network comes back
 window.addEventListener("online", () => safeLoad());
+
+// ---- Dark mode toggle ----
+const themeKey = 'rw-theme';
+const root = document.documentElement;
+function setTheme(mode) {
+  if (mode === 'dark') {
+    root.setAttribute('data-theme', 'dark');
+    localStorage.setItem(themeKey, 'dark');
+  } else {
+    root.removeAttribute('data-theme');
+    localStorage.setItem(themeKey, 'light');
+  }
+}
+document.getElementById('themeToggle')?.addEventListener('click', () => {
+  const isDark = root.getAttribute('data-theme') === 'dark';
+  setTheme(isDark ? 'light' : 'dark');
+});
+// initialize
+setTheme(localStorage.getItem(themeKey) || 'light');
+
