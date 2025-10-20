@@ -4,43 +4,24 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Radiant Waves</title>
-  <link rel="icon" type="image/png" href="img/Radiantwaves nobg.png">
-<!-- in <head> -->
-<style>
-  .rw-status {
-    position: fixed; top: 12px; right: 12px; z-index: 9999;
-    font: 12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
-    padding: 6px 10px; border-radius: 999px; background: rgba(0,0,0,.75); color: #fff;
-    box-shadow: 0 4px 16px rgba(0,0,0,.25); user-select: none;
-  }
-  .rw-status.syncing { background: rgba(32,101,209,.9); }   /* blue */
-  .rw-status.offline { background: rgba(204,41,54,.9); }    /* red */
-  .rw-status.stale   { background: rgba(153,98,12,.9); }    /* amber */
-</style>
 
-  <link rel="stylesheet" href="styles.css" />
+  <!-- Favicon/logo (no spaces in filename) -->
+  <link rel="icon" type="image/png" href="./img/Radiantwaves-nobg.png" />
+
+  <!-- Font Awesome for footer icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" referrerpolicy="no-referrer" />
+
+  <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <div id="rwStatus" class="rw-status">Live • <span id="rwTime">never</span></div>
-  <!-- <header class="topbar">
-  <a href="/" class="brand">
-    <img class="brand-logo" src="img/Radiantwaves nobgedit.png" alt="RadiantWaves">
-    <span class="brand-name">RadiantWaves</span>
-  </a>
-</header> -->
-
+  <!-- Top brand bar -->
+  <div class="brand-strip"></div>
 
   <!-- Header / Navbar -->
   <header class="site-header">
     <div class="wrap header-inner">
       <a class="brand" href="#" data-feed="" aria-label="Radiant Waves Home">
-          <header class="topbar">
-  <a href="/" class="brand">
-    <img class="brand-logo" src="img/Radiantwaves nobgedit.png" alt="RadiantWaves">
-    <!-- <span class="brand-name">RadiantWaves</span> -->
-  </a>
-</header>
-        <!-- <span class="brand-mark">Radiant</span><span class="brand-rest">Waves</span> -->
+        <span class="brand-mark">Radiant</span><span class="brand-rest">Waves</span>
       </a>
 
       <!-- Primary nav -->
@@ -58,9 +39,6 @@
       </form>
     </div>
   </header>
-  
-  <!-- Top brand bar -->
-  <div class="brand-strip"></div>
 
   <!-- Status line -->
   <div class="status-wrap">
@@ -81,15 +59,15 @@
     <div class="wrap footer-inner">
       <div class="footer-column">
         <h3>Radiant Waves</h3>
-        <p>Delivering accurate and timely news from around the world. Trusted by millions of readers daily.</p>
+        <p>Delivering accurate and timely news from around the world.</p>
         <div class="social-links">
-          <a href="#"><i class="fab fa-facebook-f"></i></a>
-          <a href="#"><i class="fab fa-twitter"></i></a>
-          <a href="#"><i class="fab fa-instagram"></i></a>
-          <a href="#"><i class="fab fa-linkedin-in"></i></a>
+          <a href="#" aria-label="Facebook"><i class="fab fa-facebook-f"></i></a>
+          <a href="#" aria-label="Twitter"><i class="fab fa-x-twitter"></i></a>
+          <a href="#" aria-label="Instagram"><i class="fab fa-instagram"></i></a>
+          <a href="#" aria-label="LinkedIn"><i class="fab fa-linkedin-in"></i></a>
         </div>
       </div>
-      
+
       <div class="footer-column">
         <h3>Categories</h3>
         <ul class="footer-links">
@@ -100,7 +78,7 @@
           <li><a href="#">Business</a></li>
         </ul>
       </div>
-      
+
       <div class="footer-column">
         <h3>Company</h3>
         <ul class="footer-links">
@@ -111,9 +89,9 @@
           <li><a href="#">Privacy Policy</a></li>
         </ul>
       </div>
-      
+
       <div class="footer-column">
-        <h3>Contact Info</h3>
+        <h3>Contact</h3>
         <ul class="footer-links">
           <li><i class="fas fa-map-marker-alt"></i> 123 News Street, City</li>
           <li><i class="fas fa-phone"></i> +1 234 567 8900</li>
@@ -121,18 +99,18 @@
         </ul>
       </div>
     </div>
-    
+
     <div class="copyright wrap">
       <p>© <span id="year"></span> Radiant Waves • Curated feeds from your sources</p>
     </div>
   </footer>
 
   <script type="module">
-    // small footer year helper
     document.getElementById('year').textContent = new Date().getFullYear();
   </script>
-  <!-- app modules -->
-  <script type="module" src="settings.js"></script>
-   <script type="module" src="app.js?v=20250827a"></script>
+
+  <!-- App modules (module type ensures ES imports work) -->
+  <script type="module" src="./settings.js?v=20250827a"></script>
+  <script type="module" src="./app.js?v=20250827a"></script>
 </body>
 </html>
