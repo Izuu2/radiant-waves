@@ -1,0 +1,335 @@
+[1mdiff --git a/api.py b/api.py[m
+[1mindex aaeff06..cdda8aa 100644[m
+[1m--- a/api.py[m
+[1m+++ b/api.py[m
+[36m@@ -1,23 +1,30 @@[m
+[31m-import os, re, json, logging[m
+[32m+[m[32m# api.py[m
+[32m+[m[32mimport os[m
+[32m+[m[32mimport re[m
+[32m+[m[32mimport json[m
+[32m+[m[32mimport logging[m
+ from datetime import datetime, timezone[m
+ from urllib.parse import urlparse, urljoin[m
+[31m-import requests[m
+ [m
+[32m+[m[32mimport requests[m
+ from flask import Flask, jsonify, request, Response[m
+ from flask_cors import CORS[m
+ from google.cloud import firestore[m
+ from google.oauth2 import service_account[m
+[32m+[m
+ # ----------------- Config -----------------[m
+ PROJECT_ID = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()[m
+[31m-FETCH_WINDOW = int(os.getenv("FETCH_WINDOW", "500"))  # how many newest docs to consider server-side[m
+[32m+[m[32mFETCH_WINDOW = int(os.getenv("FETCH_WINDOW", "500"))  # newest docs window for /articles[m
+ FALLBACK_USER_AGENT = ([m
+     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "[m
+     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"[m
+ )[m
+[31m-PICKER_VERSION = "v4"   # picker build marker[m
+[32m+[m[32mPICKER_VERSION = "v4"   # image picker build marker[m
+ CACHE_PATH = os.path.join(os.path.dirname(__file__), "cache_articles.json")[m
+[32m+[m[32mENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "1") == "1"[m
+ # ------------------------------------------[m
+ [m
+[32m+[m[32m# Flask[m
+ app = Flask(__name__)[m
+ app.url_map.strict_slashes = False[m
+ CORS(app)[m
+[36m@@ -25,7 +32,7 @@[m [mCORS(app)[m
+ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")[m
+ log = logging.getLogger("api")[m
+ [m
+[31m-# ------------- Helpers (cache + time) -------------[m
+[32m+[m[32m# ----------------- Helpers (cache + time) -----------------[m
+ def _write_cache(rows: list) -> None:[m
+     try:[m
+         with open(CACHE_PATH, "w", encoding="utf-8") as f:[m
+[36m@@ -60,13 +67,7 @@[m [mdef doc_to_public(d):[m
+             out[k] = v.isoformat()[m
+     return out[m
+ [m
+[31m-# Firestore[m
+[31m-# db = firestore.Client(project=PROJECT_ID) if PROJECT_ID else firestore.Client()[m
+[31m-# coll = db.collection("articles")[m
+[31m-# Firestore (credential-aware)[m
+[31m-# --- Firestore auth bootstrap ---[m
+[31m-from google.oauth2 import service_account  # make sure this import exists above[m
+[31m-[m
+[32m+[m[32m# ----------------- Firestore (credential-aware) -----------------[m
+ CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()[m
+ [m
+ def _is_service_account_json(path: str) -> bool:[m
+[36m@@ -88,15 +89,12 @@[m [mif _is_service_account_json(CREDS_PATH):[m
+     db = firestore.Client(project=(PROJECT_ID or creds.project_id), credentials=creds)[m
+     log.info(f"Firestore: using service account at {CREDS_PATH}")[m
+ else:[m
+[31m-    # No valid service-account JSON -> use Application Default Credentials[m
+[31m-    # (locally works if you've run: gcloud auth application-default login)[m
+     db = firestore.Client(project=(PROJECT_ID or None))[m
+     log.info("Firestore: using Application Default Credentials")[m
+ [m
+ coll = db.collection("articles")[m
+ [m
+[31m-[m
+[31m-# ------------- CORS + cache control -------------[m
+[32m+[m[32m# ----------------- CORS + cache headers -----------------[m
+ @app.after_request[m
+ def add_cors(resp):[m
+     resp.headers["Access-Control-Allow-Origin"] = "*"[m
+[36m@@ -115,7 +113,7 @@[m [mdef add_cors(resp):[m
+         resp.headers["Expires"] = "0"[m
+     return resp[m
+ [m
+[31m-# ------------- Articles -------------[m
+[32m+[m[32m# ----------------- Articles API -----------------[m
+ @app.route("/articles", methods=["GET", "OPTIONS"])[m
+ def list_articles():[m
+     if request.method == "OPTIONS":[m
+[36m@@ -143,22 +141,19 @@[m [mdef list_articles():[m
+     try:[m
+         qref = coll.order_by("ingestedAt", direction=firestore.Query.DESCENDING).limit(window)[m
+         docs = [doc.to_dict() for doc in qref.stream()][m
+[31m-        # Refresh cache with public-formatted rows[m
+[31m-        _write_cache([doc_to_public(d) for d in docs])[m
+[32m+[m[32m        _write_cache([doc_to_public(d) for d in docs])  # refresh cache[m
+     except Exception as e:[m
+         log.warning("Firestore fetch failed, using cache: %s", e)[m
+         docs = _read_cache()[m
+         from_cache = True[m
+[31m-        # If still nothing, serve empty array (keep site alive)[m
+         if not docs:[m
+             resp = jsonify([])[m
+             resp.headers["X-From-Cache"] = "1"[m
+             return resp[m
+ [m
+[31m-    # Optional in-memory filters (works for both Firestore dicts and cached dicts)[m
+[32m+[m[32m    # Optional filters[m
+     if feed:[m
+         docs = [d for d in docs if (d.get("feed") or "").lower() == feed.lower()][m
+[31m-[m
+     if q:[m
+         tl = lambda s: (s or "").lower()[m
+         docs = [[m
+[36m@@ -173,7 +168,6 @@[m [mdef list_articles():[m
+ [m
+     docs.sort(key=key, reverse=True)[m
+ [m
+[31m-    # Convert to public format if these came from Firestore[m
+     if not from_cache:[m
+         docs = [doc_to_public(d) for d in docs][m
+ [m
+[36m@@ -181,7 +175,7 @@[m [mdef list_articles():[m
+     resp.headers["X-From-Cache"] = "1" if from_cache else "0"[m
+     return resp[m
+ [m
+[31m-# ------------- Image proxy -------------[m
+[32m+[m[32m# ----------------- Image proxy -----------------[m
+ @app.route("/img", methods=["GET"])[m
+ def proxy_image():[m
+     raw = (request.args.get("url") or "").strip()[m
+[36m@@ -202,8 +196,21 @@[m [mdef proxy_image():[m
+     except Exception:[m
+         return ("Image proxy error", 502)[m
+ [m
+[31m-# ------------- On-the-fly picker -------------[m
+[32m+[m[32m# ----------------- Image picker -----------------[m
+ _LOGOISH = re.compile(r"(logo|favicon|sprite|placeholder|default|brand|og[-_]?default)", re.I)[m
+[32m+[m[32m_GOOD_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")[m
+[32m+[m[32m_BAD_HOST_BITS = ([m
+[32m+[m[32m    "scorecardresearch.com",[m
+[32m+[m[32m    "doubleclick.net",[m
+[32m+[m[32m    "googletagmanager.com",[m
+[32m+[m[32m    "google-analytics.com",[m
+[32m+[m[32m    "analytics.google.com",[m
+[32m+[m[32m    "adservice.google.com",[m
+[32m+[m[32m    "quantserve.com",[m
+[32m+[m[32m    "pixel.wp.com",[m
+[32m+[m[32m    "stats.wp.com",[m
+[32m+[m[32m    "facebook.com/tr",[m
+[32m+[m[32m)[m
+ [m
+ def _looks_like_logo(u):[m
+     s = (u or "").lower()[m
+[36m@@ -235,7 +242,6 @@[m [mdef _extract_from_jsonld(html):[m
+     urls = [][m
+     if not html:[m
+         return urls[m
+[31m-    # light regex JSON-LD scrape[m
+     for m in re.finditer(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', html, re.I | re.S):[m
+         try:[m
+             data = json.loads(m.group(1))[m
+[36m@@ -268,19 +274,19 @@[m [mdef _extract_from_meta_and_dom(html, page_url):[m
+     urls = [][m
+     amp_url = None[m
+ [m
+[31m-    # 1) OG/Twitter/meta + itemprop=image[m
+[32m+[m[32m    # meta tags[m
+     for m in re.finditer([m
+         r'<meta[^>]+(?:property|name|itemprop)=["\'](?:og:image(?::(?:secure_url|url))?|twitter:image(?::src)?|image)["\'][^>]+content=["\']([^"\']+)["\']',[m
+         html, re.I[m
+     ):[m
+         urls.append(m.group(1))[m
+ [m
+[31m-    # 2) <link rel="image_src">[m
+[32m+[m[32m    # <link rel="image_src">[m
+     m = re.search(r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']', html, re.I)[m
+     if m:[m
+         urls.append(m.group(1))[m
+ [m
+[31m-    # 3) srcset / data-srcset (pick largest)[m
+[32m+[m[32m    # srcset[m
+     for m in re.finditer(r'<(?:source|img)[^>]+srcset=["\']([^"\']+)["\']', html, re.I):[m
+         cand = _pick_from_srcset(m.group(1))[m
+         if cand:[m
+[36m@@ -290,21 +296,21 @@[m [mdef _extract_from_meta_and_dom(html, page_url):[m
+         if cand:[m
+             urls.append(cand)[m
+ [m
+[31m-    # 4) <figure> first <img>, then general <img>[m
+[32m+[m[32m    # <figure> and general <img>[m
+     for m in re.finditer(r'<figure[^>]*>.*?<img[^>]+src=["\']([^"\']+)["\']', html, re.I | re.S):[m
+         urls.append(m.group(1))[m
+     for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.I):[m
+         urls.append(m.group(1))[m
+ [m
+[31m-    # 5) lazy data-* (data-src, data-original, data-lazy, data-lazy-src)[m
+[32m+[m[32m    # lazy data-*[m
+     for m in re.finditer(r'<img[^>]+data-(?:src|original|lazy|lazy-src)=["\']([^"\']+)["\']', html, re.I):[m
+         urls.append(m.group(1))[m
+ [m
+[31m-    # 6) CSS background-image URLs in inline styles[m
+[32m+[m[32m    # CSS background images[m
+     for m in re.finditer(r'background-image\s*:\s*url\((["\']?)([^"\')]+)\1\)', html, re.I):[m
+         urls.append(m.group(2))[m
+ [m
+[31m-    # 7) <noscript> blocks often contain real <img>[m
+[32m+[m[32m    # noscript blocks[m
+     for nm in re.finditer(r'<noscript[^>]*>(.*?)</noscript>', html, re.I | re.S):[m
+         part = nm.group(1) or ""[m
+         for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', part, re.I):[m
+[36m@@ -316,7 +322,7 @@[m [mdef _extract_from_meta_and_dom(html, page_url):[m
+             if cand:[m
+                 urls.append(cand)[m
+ [m
+[31m-    # 8) AMP link (we'll fetch later if present)[m
+[32m+[m[32m    # AMP[m
+     amp = re.search(r'<link[^>]+rel=["\']amphtml["\'][^>]+href=["\']([^"\']+)["\']', html, re.I)[m
+     if amp:[m
+         amp_url = (amp.group(1) or "").strip()[m
+[36m@@ -335,21 +341,6 @@[m [mdef _extract_from_meta_and_dom(html, page_url):[m
+ [m
+     return abs_urls, amp_url[m
+ [m
+[31m-# --- picker filter helpers ---[m
+[31m-_GOOD_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")[m
+[31m-_BAD_HOST_BITS = ([m
+[31m-    "scorecardresearch.com",[m
+[31m-    "doubleclick.net",[m
+[31m-    "googletagmanager.com",[m
+[31m-    "google-analytics.com",[m
+[31m-    "analytics.google.com",[m
+[31m-    "adservice.google.com",[m
+[31m-    "quantserve.com",[m
+[31m-    "pixel.wp.com",[m
+[31m-    "stats.wp.com",[m
+[31m-    "facebook.com/tr",[m
+[31m-)[m
+[31m-[m
+ def _is_good_image_candidate(u):[m
+     try:[m
+         p = urlparse(u)[m
+[36m@@ -394,11 +385,10 @@[m [mdef _head_big_enough(url):[m
+         return False[m
+ [m
+ def _site_specific(page_url, html):[m
+[31m-    """Hard rules for known CMS/sites (e.g., Sidearm/Sports college pages)."""[m
+[32m+[m[32m    """Hard rules for known CMS/sites (example: Sidearm/Sports pages)."""[m
+     host = (urlparse(page_url).netloc or "").lower()[m
+     hlow = html.lower()[m
+ [m
+[31m-    # Sidearm/Sports / Frostburg pages[m
+     if "frostburgsports.com" in host or "sidearmsports" in hlow:[m
+         m = re.search(r'property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.I)[m
+         if m:[m
+[36m@@ -431,7 +421,7 @@[m [mdef _pick_image_from_page(page_url, timeout=15):[m
+ [m
+     html = r.text[m
+ [m
+[31m-    # 0) site-specific hooks[m
+[32m+[m[32m    # 0) site-specific hook[m
+     special = _site_specific(page_url, html)[m
+     if special and _is_good_image_candidate(special) and _head_big_enough(special):[m
+         return special[m
+[36m@@ -488,7 +478,7 @@[m [mdef _pick_image_from_page(page_url, timeout=15):[m
+             return u[m
+     return None[m
+ [m
+[31m-@app.route("/pick_image", methods=["GET"])[m
+[32m+[m[32m@app.get("/pick_image")[m
+ def pick_image():[m
+     page_url = (request.args.get("url") or "").strip()[m
+     if not page_url:[m
+[36m@@ -503,7 +493,7 @@[m [mdef pick_image():[m
+         u = ""[m
+     return jsonify({"version": PICKER_VERSION, "imageUrl": u}), 200[m
+ [m
+[31m-# ------------- Diag / Health -------------[m
+[32m+[m[32m# ----------------- Diag / Health -----------------[m
+ @app.get("/diag")[m
+ def diag():[m
+     info = {[m
+[36m@@ -537,37 +527,27 @@[m [mdef diag():[m
+ def health():[m
+     return "ok"[m
+ [m
+[31m-# ------------- Main -------------[m
+[32m+[m[32m# ----------------- Scheduler (runs under gunicorn) -----------------[m
+[32m+[m[32mimport subprocess[m
+ from apscheduler.schedulers.background import BackgroundScheduler[m
+ from atexit import register[m
+[31m-import subprocess, os[m
+ [m
+ def run_ingest_job():[m
+[32m+[m[32m    log.info("🚀 Ingest job starting…")[m
+[32m+[m[32m    # call your separate script so logic stays isolated[m
+     subprocess.run(["python", "scripts/ingest.py"], check=False)[m
+[32m+[m[32m    log.info("✅ Ingest job finished")[m
+ [m
+[31m-if __name__ == "__main__":[m
+[31m-    scheduler = BackgroundScheduler(daemon=True)[m
+[31m-    scheduler.add_job(run_ingest_job, "interval", minutes=30)[m
+[31m-    scheduler.start()[m
+[31m-    register(lambda: scheduler.shutdown(wait=False))[m
+[31m-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))[m
+[31m-[m
+[31m-[m
+[31m-import logging, os, subprocess[m
+[31m-from apscheduler.schedulers.background import BackgroundScheduler[m
+[31m-from atexit import register[m
+[31m-[m
+[31m-logging.basicConfig(level=logging.INFO)[m
+[31m-[m
+[31m-def run_ingest_job():[m
+[31m-    logging.info("🚀 Ingest job starting…")[m
+[31m-    subprocess.run(["python", "scripts/ingest.py"], check=False)[m
+[31m-    logging.info("✅ Ingest job finished")[m
+[32m+[m[32mif ENABLE_SCHEDULER:[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        _sched = BackgroundScheduler(daemon=True)[m
+[32m+[m[32m        _sched.add_job(run_ingest_job, "interval", minutes=30)[m
+[32m+[m[32m        _sched.start()[m
+[32m+[m[32m        log.info("🕒 Scheduler started (every 30 min, gunicorn import)")[m
+[32m+[m[32m        register(lambda: _sched.shutdown(wait=False))[m
+[32m+[m[32m    except Exception:[m
+[32m+[m[32m        log.exception("Failed to start APScheduler")[m
+ [m
+[32m+[m[32m# ----------------- Local dev runner -----------------[m
+ if __name__ == "__main__":[m
+[31m-    scheduler = BackgroundScheduler(daemon=True)[m
+[31m-    scheduler.add_job(run_ingest_job, "interval", minutes=30)[m
+[31m-    scheduler.start()[m
+[31m-    logging.info("🕒 Scheduler started (every 30 min)")[m
+[31m-    register(lambda: scheduler.shutdown(wait=False))[m
+     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))[m
