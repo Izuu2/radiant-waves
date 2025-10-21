@@ -1,0 +1,17 @@
+name: Keep Render Warm
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 8 minutes
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit health endpoint
+        run: curl -fsS https://radiant-waves.onrender.com/health || true
+      - name: Warm latest/articles
+        run: |
+          curl -fsS "https://radiant-waves.onrender.com/latest" || true
+          curl -fsS "https://radiant-waves.onrender.com/articles?limit=1" || true
