@@ -1,3 +1,4 @@
+
 # api.py
 import os
 import re
@@ -7,7 +8,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, urljoin
 
 import requests
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, redirect
 from flask_cors import CORS
 from google.cloud import firestore
 from google.oauth2 import service_account
@@ -98,7 +99,7 @@ coll = db.collection("articles")
 @app.after_request
 def add_cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, POST"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
 
     if request.path.startswith("/articles"):
@@ -140,8 +141,12 @@ def list_articles():
     # Primary: Firestore
     try:
         qref = coll.order_by("ingestedAt", direction=firestore.Query.DESCENDING).limit(window)
-        docs = [doc.to_dict() for doc in qref.stream()]
-        _write_cache([doc_to_public(d) for d in docs])  # refresh cache
+        docs = []
+        for _doc in qref.stream():
+            d = _doc.to_dict()
+            d["id"] = _doc.id  # <-- include stable id for Zapier/redirects
+            docs.append(d)
+        _write_cache([doc_to_public(d) for d in docs])  # refresh cache including id
     except Exception as e:
         log.warning("Firestore fetch failed, using cache: %s", e)
         docs = _read_cache()
@@ -526,6 +531,37 @@ def diag():
 @app.get("/health")
 def health():
     return "ok"
+
+# ----------------- Latest (for Zapier) -----------------
+@app.get("/latest")
+def latest():
+    try:
+        qref = coll.order_by("ingestedAt", direction=firestore.Query.DESCENDING).limit(1)
+        out = []
+        for _doc in qref.stream():
+            d = _doc.to_dict()
+            d["id"] = _doc.id
+            out.append(doc_to_public(d))
+        if not out:
+            return jsonify({"ok": False, "error": "no_articles"}), 404
+        return jsonify({"ok": True, "article": out[0]}), 200
+    except Exception as e:
+        log.exception("latest failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ----------------- Redirect (branded link) -----------------
+@app.get("/r/<docid>")
+def redirect_article(docid):
+    try:
+        snap = coll.document(docid).get()
+        if not snap.exists:
+            return "Not found", 404
+        url = (snap.to_dict() or {}).get("url") or "/"
+        # TODO: increment click count / analytics here if desired
+        return redirect(url, code=302)
+    except Exception:
+        log.exception("redirect failed")
+        return "Error", 500
 
 # ----------------- Scheduler (runs under gunicorn) -----------------
 import subprocess
