@@ -98,7 +98,8 @@ coll = db.collection("articles")
 @app.after_request
 def add_cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, POST"
+    # include HEAD for completeness (redirects, curl -I)
+    resp.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS, POST"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
 
     if request.path.startswith("/articles"):
@@ -107,11 +108,20 @@ def add_cors(resp):
         resp.headers["Expires"] = "0"
     elif request.path.startswith("/img"):
         resp.headers["Cache-Control"] = "public, max-age=86400"
-    elif request.path.startswith("/pick_image"):
+    elif request.path.startswith("/pick_image") or request.path.startswith("/latest"):
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
     return resp
+
+# ----------------- Root (simple info) -----------------
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({
+        "ok": True,
+        "service": "radiant-waves",
+        "endpoints": ["/articles", "/img", "/pick_image", "/diag", "/health", "/latest", "/r/<docid>"]
+    })
 
 # ----------------- Articles API -----------------
 @app.route("/articles", methods=["GET", "OPTIONS"])
@@ -143,7 +153,7 @@ def list_articles():
         docs = []
         for _doc in qref.stream():
             d = _doc.to_dict()
-            d["id"] = _doc.id  # include stable id
+            d["id"] = _doc.id  # include stable id for Zapier/redirects
             docs.append(d)
         _write_cache([doc_to_public(d) for d in docs])  # refresh cache including id
     except Exception as e:
@@ -482,7 +492,7 @@ def _pick_image_from_page(page_url, timeout=15):
             return u
     return None
 
-@app.route("/pick_image", methods=["GET"])
+@app.get("/pick_image")
 def pick_image():
     page_url = (request.args.get("url") or "").strip()
     if not page_url:
@@ -498,7 +508,7 @@ def pick_image():
     return jsonify({"version": PICKER_VERSION, "imageUrl": u}), 200
 
 # ----------------- Diag / Health -----------------
-@app.route("/diag", methods=["GET"])
+@app.get("/diag")
 def diag():
     info = {
         "ok": True,
@@ -527,7 +537,7 @@ def diag():
         return jsonify(info), 500
     return jsonify(info)
 
-@app.route("/health", methods=["GET"])
+@app.get("/health")
 def health():
     return "ok"
 
@@ -549,21 +559,17 @@ def latest():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ----------------- Redirect (branded link) -----------------
-@app.route("/r/<docid>", methods=["GET"])
+@app.route("/r/<docid>", methods=["GET", "HEAD", "OPTIONS"])
 def redirect_article(docid):
+    # Preflight
+    if request.method == "OPTIONS":
+        return ("", 204)
     try:
-        ref = coll.document(docid)
-        snap = ref.get()
+        snap = coll.document(docid).get()
         if not snap.exists:
             return "Not found", 404
-
-        # Click analytics (atomic)
-        try:
-            ref.set({"clicks": firestore.Increment(1)}, merge=True)
-        except Exception:
-            log.warning("click increment failed for %s", docid)
-
         url = (snap.to_dict() or {}).get("url") or "/"
+        # You can increment analytics here if needed
         return redirect(url, code=302)
     except Exception:
         log.exception("redirect failed")
@@ -593,3 +599,4 @@ if ENABLE_SCHEDULER:
 # ----------------- Local dev runner -----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+
