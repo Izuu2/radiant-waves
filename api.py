@@ -482,7 +482,7 @@ def _pick_image_from_page(page_url, timeout=15):
             return u
     return None
 
-@app.get("/pick_image")
+@app.route("/pick_image", methods=["GET"])
 def pick_image():
     page_url = (request.args.get("url") or "").strip()
     if not page_url:
@@ -498,7 +498,7 @@ def pick_image():
     return jsonify({"version": PICKER_VERSION, "imageUrl": u}), 200
 
 # ----------------- Diag / Health -----------------
-@app.get("/diag")
+@app.route("/diag", methods=["GET"])
 def diag():
     info = {
         "ok": True,
@@ -527,12 +527,12 @@ def diag():
         return jsonify(info), 500
     return jsonify(info)
 
-@app.get("/health")
+@app.route("/health", methods=["GET"])
 def health():
     return "ok"
 
 # ----------------- Latest (for Zapier) -----------------
-@app.get("/latest")
+@app.route("/latest", methods=["GET"])
 def latest():
     try:
         qref = coll.order_by("ingestedAt", direction=firestore.Query.DESCENDING).limit(1)
@@ -549,7 +549,7 @@ def latest():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ----------------- Redirect (branded link) -----------------
-@app.get("/r/<docid>")
+@app.route("/r/<docid>", methods=["GET"])
 def redirect_article(docid):
     try:
         ref = coll.document(docid)
