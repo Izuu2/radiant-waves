@@ -1,4 +1,3 @@
-
 # api.py
 import os
 import re
@@ -144,7 +143,7 @@ def list_articles():
         docs = []
         for _doc in qref.stream():
             d = _doc.to_dict()
-            d["id"] = _doc.id  # <-- include stable id for Zapier/redirects
+            d["id"] = _doc.id  # include stable id
             docs.append(d)
         _write_cache([doc_to_public(d) for d in docs])  # refresh cache including id
     except Exception as e:
@@ -553,11 +552,18 @@ def latest():
 @app.get("/r/<docid>")
 def redirect_article(docid):
     try:
-        snap = coll.document(docid).get()
+        ref = coll.document(docid)
+        snap = ref.get()
         if not snap.exists:
             return "Not found", 404
+
+        # Click analytics (atomic)
+        try:
+            ref.set({"clicks": firestore.Increment(1)}, merge=True)
+        except Exception:
+            log.warning("click increment failed for %s", docid)
+
         url = (snap.to_dict() or {}).get("url") or "/"
-        # TODO: increment click count / analytics here if desired
         return redirect(url, code=302)
     except Exception:
         log.exception("redirect failed")
