@@ -1,5 +1,9 @@
 # api.py
 import os
+# Silence noisy gRPC logs before importing Google libs
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+os.environ.setdefault("GRPC_TRACE", "")
+
 import re
 import json
 import logging
@@ -21,7 +25,9 @@ FALLBACK_USER_AGENT = (
 )
 PICKER_VERSION = "v4"   # image picker build marker
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "cache_articles.json")
-ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "1") == "1"
+
+# Gate the scheduler so it runs in exactly ONE process
+RUN_JOBS = os.getenv("RUN_JOBS", "0") == "1"
 # ------------------------------------------
 
 # Flask
@@ -67,7 +73,7 @@ def doc_to_public(d):
             out[k] = v.isoformat()
     return out
 
-# ---------- NEW: always ensure imageUrl/image_url for outbound articles ----------
+# ---------- Ensure imageUrl/image_url for outbound articles ----------
 def ensure_image_fields(d: dict) -> dict:
     """Guarantee imageUrl/image_url on an article dict by pulling from DB or page."""
     url = d.get("url") or d.get("link")
@@ -80,11 +86,11 @@ def ensure_image_fields(d: dict) -> dict:
             img = None
 
     if img:
-        d["imageUrl"]  = img      # camelCase (handy for Zapier mappers)
-        d["image_url"] = img      # snake_case mirror (optional)
-        d["image"]     = img      # alias (optional)
+        d["imageUrl"]  = img      # camelCase
+        d["image_url"] = img      # snake_case mirror
+        d["image"]     = img      # alias
     return d
-# -------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 
 # ----------------- Firestore (credential-aware) -----------------
 CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
@@ -117,7 +123,6 @@ coll = db.collection("articles")
 @app.after_request
 def add_cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
-    # include HEAD for completeness (redirects, curl -I)
     resp.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS, POST"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
 
@@ -127,7 +132,7 @@ def add_cors(resp):
         resp.headers["Expires"] = "0"
     elif request.path.startswith("/img"):
         resp.headers["Cache-Control"] = "public, max-age=86400"
-    elif request.path.startswith("/pick_image") or request.path.startswith("/latest"):
+    elif request.path.startswith(("/pick_image", "/latest")):
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
@@ -208,7 +213,7 @@ def list_articles():
     resp.headers["X-From-Cache"] = "1" if from_cache else "0"
     return resp
 
-# ----------------- Image proxy -----------------
+# ----------------- Image proxy (streamed, memory-safe) -----------------
 @app.route("/img", methods=["GET"])
 def proxy_image():
     raw = (request.args.get("url") or "").strip()
@@ -221,11 +226,27 @@ def proxy_image():
             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             "Referer": f"{p.scheme}://{p.netloc}/",
         }
-        r = requests.get(raw, headers=headers, timeout=10, allow_redirects=True)
-        if r.status_code >= 400 or not r.content:
+        # stream to avoid loading the whole file into RAM
+        r = requests.get(raw, headers=headers, timeout=(5, 10), allow_redirects=True, stream=True)
+        if r.status_code >= 400:
             return ("Image fetch failed", 502)
+
         ct = r.headers.get("Content-Type", "image/jpeg")
-        return Response(r.content, content_type=ct)
+        # optional safety: cap ~5MB
+        max_bytes = 5 * 1024 * 1024
+        sent = 0
+
+        def generate():
+            nonlocal sent
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    break
+                sent += len(chunk)
+                if sent > max_bytes:
+                    break
+                yield chunk
+
+        return Response(generate(), content_type=ct)
     except Exception:
         return ("Image proxy error", 502)
 
@@ -569,7 +590,7 @@ def latest():
         for _doc in qref.stream():
             d = _doc.to_dict()
             d["id"] = _doc.id
-            d = ensure_image_fields(d)            # <-- ensure imageUrl/image_url present
+            d = ensure_image_fields(d)  # ensure imageUrl/image_url present
             out.append(doc_to_public(d))
         if not out:
             return jsonify({"ok": False, "error": "no_articles"}), 404
@@ -606,12 +627,13 @@ def run_ingest_job():
     subprocess.run(["python", "scripts/ingest.py"], check=False)
     log.info("✅ Ingest job finished")
 
-if ENABLE_SCHEDULER:
+if RUN_JOBS:
     try:
-        _sched = BackgroundScheduler(daemon=True)
-        _sched.add_job(run_ingest_job, "interval", minutes=30)
+        _sched = BackgroundScheduler(daemon=True, timezone="UTC")
+        # Align exactly at :00 and :30 every hour
+        _sched.add_job(run_ingest_job, "cron", minute="0,30")
         _sched.start()
-        log.info("🕒 Scheduler started (every 30 min, gunicorn import)")
+        log.info("🕒 Scheduler started (cron at :00/:30 UTC)")
         register(lambda: _sched.shutdown(wait=False))
     except Exception:
         log.exception("Failed to start APScheduler")
@@ -619,3 +641,4 @@ if ENABLE_SCHEDULER:
 # ----------------- Local dev runner -----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+
