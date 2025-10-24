@@ -67,6 +67,25 @@ def doc_to_public(d):
             out[k] = v.isoformat()
     return out
 
+# ---------- NEW: always ensure imageUrl/image_url for outbound articles ----------
+def ensure_image_fields(d: dict) -> dict:
+    """Guarantee imageUrl/image_url on an article dict by pulling from DB or page."""
+    url = d.get("url") or d.get("link")
+    img = d.get("imageUrl") or d.get("image_url") or d.get("image")
+
+    if (not img) and url:
+        try:
+            img = _pick_image_from_page(url)
+        except Exception:
+            img = None
+
+    if img:
+        d["imageUrl"]  = img      # camelCase (handy for Zapier mappers)
+        d["image_url"] = img      # snake_case mirror (optional)
+        d["image"]     = img      # alias (optional)
+    return d
+# -------------------------------------------------------------------------------
+
 # ----------------- Firestore (credential-aware) -----------------
 CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 
@@ -550,6 +569,7 @@ def latest():
         for _doc in qref.stream():
             d = _doc.to_dict()
             d["id"] = _doc.id
+            d = ensure_image_fields(d)            # <-- ensure imageUrl/image_url present
             out.append(doc_to_public(d))
         if not out:
             return jsonify({"ok": False, "error": "no_articles"}), 404
@@ -599,4 +619,3 @@ if ENABLE_SCHEDULER:
 # ----------------- Local dev runner -----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
-
