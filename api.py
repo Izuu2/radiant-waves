@@ -1,7 +1,12 @@
 # api.py
 import os
+# Silence noisy gRPC logs before importing Google libs
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+os.environ.setdefault("GRPC_TRACE", "")
+
 import re
 import json
+import time
 import logging
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urljoin
@@ -11,6 +16,7 @@ from flask import Flask, jsonify, request, Response, redirect
 from flask_cors import CORS
 from google.cloud import firestore
 from google.oauth2 import service_account
+from google.api_core.exceptions import ResourceExhausted
 
 # ----------------- Config -----------------
 PROJECT_ID = (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
@@ -21,7 +27,9 @@ FALLBACK_USER_AGENT = (
 )
 PICKER_VERSION = "v4"   # image picker build marker
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "cache_articles.json")
-ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "1") == "1"
+
+# Gate the scheduler so it runs in exactly ONE process
+RUN_JOBS = os.getenv("RUN_JOBS", "0") == "1"
 # ------------------------------------------
 
 # Flask
@@ -67,6 +75,25 @@ def doc_to_public(d):
             out[k] = v.isoformat()
     return out
 
+# ---------- Ensure imageUrl/image_url for outbound articles ----------
+def ensure_image_fields(d: dict) -> dict:
+    """Guarantee imageUrl/image_url on an article dict by pulling from DB or page."""
+    url = d.get("url") or d.get("link")
+    img = d.get("imageUrl") or d.get("image_url") or d.get("image")
+
+    if (not img) and url:
+        try:
+            img = _pick_image_from_page(url)
+        except Exception:
+            img = None
+
+    if img:
+        d["imageUrl"]  = img      # camelCase
+        d["image_url"] = img      # snake_case mirror
+        d["image"]     = img      # alias
+    return d
+# -------------------------------------------------------------------
+
 # ----------------- Firestore (credential-aware) -----------------
 CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 
@@ -98,7 +125,6 @@ coll = db.collection("articles")
 @app.after_request
 def add_cors(resp):
     resp.headers["Access-Control-Allow-Origin"] = "*"
-    # include HEAD for completeness (redirects, curl -I)
     resp.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS, POST"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
 
@@ -108,7 +134,7 @@ def add_cors(resp):
         resp.headers["Expires"] = "0"
     elif request.path.startswith("/img"):
         resp.headers["Cache-Control"] = "public, max-age=86400"
-    elif request.path.startswith("/pick_image") or request.path.startswith("/latest"):
+    elif request.path.startswith(("/pick_image", "/latest")):
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
@@ -123,6 +149,20 @@ def root():
         "endpoints": ["/articles", "/img", "/pick_image", "/diag", "/health", "/latest", "/r/<docid>"]
     })
 
+# ----------------- Tiny in-memory TTL cache -----------------
+_MEM = {"articles": {"ts": 0.0, "payload": []}}
+_MEM_TTL = int(os.getenv("MEM_TTL_SECONDS", "60"))  # default 60s
+
+def _mem_get():
+    now = time.time()
+    if now - _MEM["articles"]["ts"] <= _MEM_TTL:
+        return _MEM["articles"]["payload"]
+    return None
+
+def _mem_set(payload):
+    _MEM["articles"]["payload"] = payload
+    _MEM["articles"]["ts"] = time.time()
+
 # ----------------- Articles API -----------------
 @app.route("/articles", methods=["GET", "OPTIONS"])
 def list_articles():
@@ -131,6 +171,7 @@ def list_articles():
 
     feed = request.args.get("feed")
     q = (request.args.get("q") or "").strip().lower()
+    cache_only = request.args.get("cache") == "1"
 
     # limit logic: browse vs search
     is_search = bool(q)
@@ -146,16 +187,49 @@ def list_articles():
         limit = min(raw_limit or 150, 150)
         window = FETCH_WINDOW
 
+    # Fast path: honor cache-only flag
+    if cache_only:
+        docs = _read_cache()
+        resp = jsonify(docs[:limit])
+        resp.headers["X-From-Cache"] = "1"
+        resp.headers["X-Mem-Cache"] = "0"
+        return resp
+
+    # In-memory TTL cache (avoid hammering Firestore on hot path)
+    mem = _mem_get()
+    if mem is not None and not is_search and not feed:
+        resp = jsonify(mem[:limit])
+        resp.headers["X-From-Cache"] = "1"
+        resp.headers["X-Mem-Cache"] = "1"
+        return resp
+
     from_cache = False
-    # Primary: Firestore
+    docs = []
+
+    # Primary: Firestore (fail fast, then fallback)
     try:
         qref = coll.order_by("ingestedAt", direction=firestore.Query.DESCENDING).limit(window)
-        docs = []
-        for _doc in qref.stream():
+
+        # Fail fast: disable client retries and cap per-RPC time
+        for _doc in qref.stream(retry=None, timeout=10):
             d = _doc.to_dict()
             d["id"] = _doc.id  # include stable id for Zapier/redirects
             docs.append(d)
-        _write_cache([doc_to_public(d) for d in docs])  # refresh cache including id
+
+        # Update disk cache
+        public_rows = [doc_to_public(d) for d in docs]
+        _write_cache(public_rows)
+
+    except ResourceExhausted as e:
+        log.warning("Firestore quota exceeded, serving cache: %s", e)
+        docs = _read_cache()
+        from_cache = True
+        if not docs:
+            resp = jsonify([])
+            resp.headers["X-From-Cache"] = "1"
+            resp.headers["X-Mem-Cache"] = "0"
+            return resp
+
     except Exception as e:
         log.warning("Firestore fetch failed, using cache: %s", e)
         docs = _read_cache()
@@ -163,6 +237,7 @@ def list_articles():
         if not docs:
             resp = jsonify([])
             resp.headers["X-From-Cache"] = "1"
+            resp.headers["X-Mem-Cache"] = "0"
             return resp
 
     # Optional filters
@@ -182,14 +257,20 @@ def list_articles():
 
     docs.sort(key=key, reverse=True)
 
+    # Public transform if not from cache file
     if not from_cache:
         docs = [doc_to_public(d) for d in docs]
 
+    # Write in-memory cache for normal browse (no filters/search)
+    if not is_search and not feed and not from_cache:
+        _mem_set(docs)
+
     resp = jsonify(docs[:limit])
     resp.headers["X-From-Cache"] = "1" if from_cache else "0"
+    resp.headers["X-Mem-Cache"] = "1" if (mem is not None and not is_search and not feed) else "0"
     return resp
 
-# ----------------- Image proxy -----------------
+# ----------------- Image proxy (streamed, memory-safe) -----------------
 @app.route("/img", methods=["GET"])
 def proxy_image():
     raw = (request.args.get("url") or "").strip()
@@ -202,11 +283,27 @@ def proxy_image():
             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             "Referer": f"{p.scheme}://{p.netloc}/",
         }
-        r = requests.get(raw, headers=headers, timeout=10, allow_redirects=True)
-        if r.status_code >= 400 or not r.content:
+        # stream to avoid loading the whole file into RAM
+        r = requests.get(raw, headers=headers, timeout=(5, 10), allow_redirects=True, stream=True)
+        if r.status_code >= 400:
             return ("Image fetch failed", 502)
+
         ct = r.headers.get("Content-Type", "image/jpeg")
-        return Response(r.content, content_type=ct)
+        # optional safety: cap ~5MB
+        max_bytes = 5 * 1024 * 1024
+        sent = 0
+
+        def generate():
+            nonlocal sent
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    break
+                sent += len(chunk)
+                if sent > max_bytes:
+                    break
+                yield chunk
+
+        return Response(generate(), content_type=ct)
     except Exception:
         return ("Image proxy error", 502)
 
@@ -528,9 +625,13 @@ def diag():
     except Exception:
         pass
     try:
-        sample = list(coll.limit(3).stream())
+        sample = list(coll.limit(3).stream(retry=None, timeout=10))
         info["sampleCount"] = len(sample)
         info["hasDoc"] = bool(sample)
+    except ResourceExhausted as e:
+        info["ok"] = True
+        info["quota"] = "exhausted"
+        info["note"] = "serving cache"
     except Exception as e:
         info["ok"] = False
         info["error"] = str(e)
@@ -547,13 +648,20 @@ def latest():
     try:
         qref = coll.order_by("ingestedAt", direction=firestore.Query.DESCENDING).limit(1)
         out = []
-        for _doc in qref.stream():
+        for _doc in qref.stream(retry=None, timeout=10):
             d = _doc.to_dict()
             d["id"] = _doc.id
+            d = ensure_image_fields(d)  # ensure imageUrl/image_url present
             out.append(doc_to_public(d))
         if not out:
             return jsonify({"ok": False, "error": "no_articles"}), 404
         return jsonify({"ok": True, "article": out[0]}), 200
+    except ResourceExhausted:
+        # graceful fallback to cache top item
+        docs = _read_cache()
+        if docs:
+            return jsonify({"ok": True, "article": docs[0]}), 200
+        return jsonify({"ok": False, "error": "quota_exceeded_and_no_cache"}), 503
     except Exception as e:
         log.exception("latest failed")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -586,12 +694,13 @@ def run_ingest_job():
     subprocess.run(["python", "scripts/ingest.py"], check=False)
     log.info("✅ Ingest job finished")
 
-if ENABLE_SCHEDULER:
+if RUN_JOBS:
     try:
-        _sched = BackgroundScheduler(daemon=True)
-        _sched.add_job(run_ingest_job, "interval", minutes=30)
+        _sched = BackgroundScheduler(daemon=True, timezone="UTC")
+        # Align exactly at :00 and :30 every hour
+        _sched.add_job(run_ingest_job, "cron", minute="0,30")
         _sched.start()
-        log.info("🕒 Scheduler started (every 30 min, gunicorn import)")
+        log.info("🕒 Scheduler started (cron at :00/:30 UTC)")
         register(lambda: _sched.shutdown(wait=False))
     except Exception:
         log.exception("Failed to start APScheduler")
@@ -599,4 +708,3 @@ if ENABLE_SCHEDULER:
 # ----------------- Local dev runner -----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
-
